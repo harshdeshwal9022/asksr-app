@@ -1,0 +1,219 @@
+ rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // =========================
+    // HELPER FUNCTIONS
+    // =========================
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function myUid() {
+      return request.auth.uid;
+    }
+
+    function myUserDoc() {
+      return get(/databases/$(database)/documents/users/$(myUid())).data;
+    }
+
+    function myUniversity() {
+      return myUserDoc().universityCode;
+    }
+
+    function myBranch() {
+      return myUserDoc().branchCode;
+    }
+
+    function isOwner(userId) {
+      return isSignedIn() && userId == myUid();
+    }
+
+    function isNonEmptyString(x, min, max) {
+      return x is string && x.size() >= min && x.size() <= max;
+    }
+
+    function isValidUrlOrEmpty(url) {
+      return url == '' || url.matches('^https?://.*');
+    }
+
+    function isValidCategory(cat) {
+      return cat in ['Placement', 'Tech/DSA', 'Academics', 'Projects'];
+    }
+
+    function isValidLanguage(lang) {
+      return lang == '' || lang in [
+        'Python','Java','C++','JavaScript',
+        'Dart','C','Go','Rust',
+        'TypeScript','Kotlin'
+      ];
+    }
+
+    function isValidTags(tags) {
+      return tags is list
+        && tags.size() <= 5
+        && tags.all(t => t is string && t.size() <= 25);
+    }
+
+    function isServerTime(ts) {
+      return ts == request.time;
+    }
+
+    // 🔒 RATE LIMIT FIXED
+    function questionRateLimit() {
+      return myUserDoc().lastQuestionAt == null
+        || request.time > myUserDoc().lastQuestionAt + duration.value(300);
+    }
+
+    function answerRateLimit() {
+      return myUserDoc().lastAnswerAt == null
+        || request.time > myUserDoc().lastAnswerAt + duration.value(60);
+    }
+
+    // =========================
+    // USERS COLLECTION
+    // =========================
+
+    match /users/{userId} {
+
+      allow read: if isSignedIn()
+        && resource.data.universityCode == myUniversity();
+
+      allow create: if isSignedIn()
+        && userId == myUid()
+        && isNonEmptyString(request.resource.data.name,2,60)
+        && isNonEmptyString(request.resource.data.username,3,30)
+        && request.resource.data.isSenior is bool
+        && request.resource.data.isVerified is bool
+        && request.resource.data.questionsCount == 0
+        && request.resource.data.answersCount == 0
+        && request.resource.data.reputation == 0
+        && isServerTime(request.resource.data.createdAt)
+        && isServerTime(request.resource.data.updatedAt);
+
+      allow update: if isOwner(userId)
+        && request.resource.data.isSenior == resource.data.isSenior
+        && request.resource.data.isVerified == resource.data.isVerified
+        && request.resource.data.createdAt == resource.data.createdAt
+        && request.resource.data.questionsCount == resource.data.questionsCount
+        && request.resource.data.answersCount == resource.data.answersCount
+        && request.resource.data.reputation == resource.data.reputation
+        && isServerTime(request.resource.data.updatedAt);
+
+      allow delete: if false;
+    }
+
+    // =========================
+    // QUESTIONS COLLECTION
+    // =========================
+
+    match /questions/{questionId} {
+
+      allow read: if isSignedIn()
+        && resource.data.targetUniversityCode == myUniversity();
+
+      allow create: if isSignedIn()
+        && questionRateLimit()
+        && request.resource.data.userId == myUid()
+        && request.resource.data.targetUniversityCode == myUniversity()
+        && request.resource.data.targetBranchCode == myBranch()
+        && isNonEmptyString(request.resource.data.question,10,500)
+        && isValidCategory(request.resource.data.category)
+        && isValidTags(request.resource.data.tags)
+        && request.resource.data.answersCount == 0
+        && request.resource.data.viewsCount == 0
+        && request.resource.data.upvotes == 0
+        && request.resource.data.downvotes == 0
+        && request.resource.data.isResolved == false
+        && request.resource.data.bestAnswerId == null
+        && isServerTime(request.resource.data.createdAt)
+        && isServerTime(request.resource.data.updatedAt);
+
+      allow update: if isOwner(resource.data.userId)
+        && request.resource.data.userId == resource.data.userId
+        && request.resource.data.createdAt == resource.data.createdAt
+        && request.resource.data.answersCount == resource.data.answersCount
+        && request.resource.data.viewsCount == resource.data.viewsCount
+        && request.resource.data.upvotes == resource.data.upvotes
+        && request.resource.data.downvotes == resource.data.downvotes
+        && request.resource.data.bestAnswerId == resource.data.bestAnswerId
+        && request.resource.data.isResolved == resource.data.isResolved
+        && isServerTime(request.resource.data.updatedAt);
+
+      allow delete: if false;
+      // =========================
+      // ANSWERS SUBCOLLECTION
+      // =========================
+
+      match /answers/{answerId} {
+
+        allow read: if isSignedIn()
+          && get(/databases/$(database)/documents/questions/$(questionId))
+             .data.targetUniversityCode == myUniversity();
+
+        allow create: if isSignedIn()
+          && answerRateLimit()
+          && request.resource.data.userId == myUid()
+          && isNonEmptyString(request.resource.data.answerText,5,2000)
+          && request.resource.data.upvotes == 0
+          && request.resource.data.downvotes == 0
+          && request.resource.data.isAccepted == false
+          && isServerTime(request.resource.data.createdAt)
+          && isServerTime(request.resource.data.updatedAt);
+
+        allow update: if isOwner(resource.data.userId)
+          && request.resource.data.userId == resource.data.userId
+          && request.resource.data.upvotes == resource.data.upvotes
+          && request.resource.data.downvotes == resource.data.downvotes
+          && request.resource.data.isAccepted == resource.data.isAccepted
+          && request.resource.data.createdAt == resource.data.createdAt
+          && isServerTime(request.resource.data.updatedAt);
+
+        allow delete: if false;
+      }
+    }
+
+    // =========================
+    // NOTIFICATIONS
+    // =========================
+
+    match /notifications/{userId}/items/{notificationId} {
+      allow read: if isOwner(userId);
+      allow create: if false;
+      allow update: if isOwner(userId)
+        && request.resource.data.diff(resource.data)
+           .changedKeys().hasOnly(['seen']);
+      allow delete: if false;
+    }
+
+    // =========================
+    // VOTES
+    // =========================
+
+    match /votes/{voteId} {
+      allow read: if isSignedIn();
+      allow create: if isSignedIn()
+        && request.resource.data.userId == myUid()
+        && request.resource.data.voteType in ['upvote','downvote']
+        && isServerTime(request.resource.data.createdAt);
+      allow update: if false;
+      allow delete: if isSignedIn();
+    }
+
+    // =========================
+    // REPORTS
+    // =========================
+
+    match /reports/{reportId} {
+      allow read: if false;
+      allow create: if isSignedIn()
+        && request.resource.data.reporterId == myUid()
+        && request.resource.data.contentId is string
+        && request.resource.data.reason is string
+        && isServerTime(request.resource.data.createdAt);
+      allow update: if false;
+      allow delete: if false;
+    }
+  }
+}
